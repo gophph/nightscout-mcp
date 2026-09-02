@@ -19,11 +19,24 @@ from src.nightscout_client import (
     update_profile,
     get_device_status,
     get_aggregated_glucose_stats,
+    parse_entry_datetime,
 )
 
 AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN")
 
 mcp = FastMCP("nightscout")
+
+
+def _entry_timestamp(entry: dict) -> Optional[str]:
+    """Return an ISO-8601 UTC timestamp string for a glucose entry.
+
+    Prefers the numeric `date` field, falling back to `dateString`
+    for entries that only have that (see parse_entry_datetime).
+    """
+    ts = parse_entry_datetime(entry)
+    if ts is None:
+        return None
+    return ts.isoformat().replace("+00:00", "Z")
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -80,7 +93,7 @@ def get_current_glucose() -> dict:
         "direction": entry.get("direction"),
         "trend": entry.get("trend"),
         "noise": entry.get("noise"),
-        "timestamp": entry.get("dateString"),
+        "timestamp": _entry_timestamp(entry),
         "device": entry.get("device"),
         "type": entry.get("type"),
     }
@@ -98,7 +111,7 @@ def get_recent_glucose(count: int = 36) -> list[dict]:
         {
             "glucose_mgdl": e.get("sgv"),
             "direction": e.get("direction"),
-            "timestamp": e.get("dateString"),
+            "timestamp": _entry_timestamp(e),
             "noise": e.get("noise"),
         }
         for e in entries
@@ -122,7 +135,7 @@ def get_glucose_by_date_range(date_from: str, date_to: str, count: int = 1000) -
         {
             "glucose_mgdl": e.get("sgv"),
             "direction": e.get("direction"),
-            "timestamp": e.get("dateString"),
+            "timestamp": _entry_timestamp(e),
         }
         for e in entries
     ]
@@ -214,13 +227,12 @@ def get_daily_glucose_stats(date: str) -> dict:
     # Hourly breakdown
     hourly: dict[int, list] = {}
     for e in entries:
-        if "sgv" in e and "dateString" in e:
-            try:
-                ts = datetime.fromisoformat(e["dateString"].replace("Z", "+00:00"))
-                hour = ts.hour
-                hourly.setdefault(hour, []).append(e["sgv"])
-            except (ValueError, KeyError):
-                pass
+        if "sgv" not in e:
+            continue
+        ts = parse_entry_datetime(e)
+        if ts is None:
+            continue
+        hourly.setdefault(ts.hour, []).append(e["sgv"])
 
     hourly_avg = {
         h: round(sum(vals) / len(vals), 1)
@@ -423,15 +435,14 @@ def analyze_glucose_patterns(hours: int = 168) -> dict:
     daily: dict[str, list] = {}
 
     for e in entries:
-        if "sgv" not in e or "dateString" not in e:
+        if "sgv" not in e:
             continue
-        try:
-            ts = datetime.fromisoformat(e["dateString"].replace("Z", "+00:00"))
-            hourly.setdefault(ts.hour, []).append(e["sgv"])
-            day = ts.strftime("%Y-%m-%d")
-            daily.setdefault(day, []).append(e["sgv"])
-        except (ValueError, KeyError):
-            pass
+        ts = parse_entry_datetime(e)
+        if ts is None:
+            continue
+        hourly.setdefault(ts.hour, []).append(e["sgv"])
+        day = ts.strftime("%Y-%m-%d")
+        daily.setdefault(day, []).append(e["sgv"])
 
     hourly_stats = {}
     for h in range(24):
