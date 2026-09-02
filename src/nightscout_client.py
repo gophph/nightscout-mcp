@@ -99,10 +99,46 @@ def get_entries(count: int = 10, find: Optional[dict] = None) -> list:
     return _get("entries.json", params)
 
 
+def _iso_to_epoch_ms(iso_str: str) -> int:
+    """Convert an ISO-8601 date string to epoch milliseconds."""
+    dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+    return int(dt.timestamp() * 1000)
+
+
+def parse_entry_datetime(entry: dict) -> Optional[datetime]:
+    """Return an entry's timestamp as a UTC datetime.
+
+    Prefers the numeric `date` field (epoch ms), which is present
+    regardless of upload method. Falls back to the legacy
+    `dateString` field for entries that only have that. This matters
+    because entries uploaded via the Nightscout v3 API (e.g. newer
+    AndroidAPS versions) omit `dateString` entirely.
+    """
+    ms = entry.get("date")
+    if ms is not None:
+        try:
+            return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            pass
+    date_string = entry.get("dateString")
+    if date_string:
+        try:
+            return datetime.fromisoformat(date_string.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    return None
+
+
 def get_entries_by_range(date_from: str, date_to: str, count: int = 1000) -> list:
+    """Get CGM entries within a date range.
+
+    Filters on the numeric `date` field (epoch ms) rather than the
+    legacy `dateString` field, since entries uploaded via the
+    Nightscout v3 API omit `dateString` entirely.
+    """
     params = {
-        "find[dateString][$gte]": date_from,
-        "find[dateString][$lte]": date_to,
+        "find[date][$gte]": str(_iso_to_epoch_ms(date_from)),
+        "find[date][$lte]": str(_iso_to_epoch_ms(date_to)),
         "count": str(count),
     }
     return _get("entries.json", params)
@@ -191,16 +227,13 @@ def get_aggregated_glucose_stats(date_from: str, date_to: str) -> dict:
     # Group readings by day
     by_day: dict[str, list] = {}
     for entry in readings:
-        if "sgv" not in entry or "dateString" not in entry:
+        if "sgv" not in entry:
             continue
-        try:
-            ts = datetime.fromisoformat(
-                entry["dateString"].replace("Z", "+00:00")
-            )
-            day_key = ts.strftime("%Y-%m-%d")
-            by_day.setdefault(day_key, []).append(entry["sgv"])
-        except (ValueError, KeyError):
-            pass
+        ts = parse_entry_datetime(entry)
+        if ts is None:
+            continue
+        day_key = ts.strftime("%Y-%m-%d")
+        by_day.setdefault(day_key, []).append(entry["sgv"])
 
     # Compute daily stats
     daily_stats = []
